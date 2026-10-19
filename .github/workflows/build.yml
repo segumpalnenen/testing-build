@@ -1,0 +1,226 @@
+name: Build
+
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit SHA anichin-app (kosongkan = main terbaru)'
+        required: false
+        default: ''
+
+env:
+  BUILD_RELEASE: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout source (repo private)
+        uses: actions/checkout@v4
+        with:
+          repository: segumpalnenen/anichin-app
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ github.event.client_payload.sha || github.event.inputs.sha || 'main' }}
+
+      - name: Info build
+        shell: bash
+        run: |
+          echo "Commit: $(git rev-parse --short HEAD)"
+          echo "Pesan: $(git log -1 --pretty=%s)"
+          echo "Dipicu oleh: ${{ github.event_name }}"
+
+      - name: Source fingerprint
+        shell: bash
+        run: |
+          echo "=== Source fingerprint ==="
+          cat SOURCE_FINGERPRINT.txt 2>/dev/null || echo "TIDAK ADA fingerprint"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Fix gradlew line endings & permissions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dos2unix
+          dos2unix ./gradlew || true
+          chmod +x ./gradlew
+
+      - name: Cek file source duplikat
+        shell: bash
+        run: |
+          echo "=== File .kt duplikat ==="
+          DUPS=$(find app/src -name "*.kt" | xargs -n1 basename | sort | uniq -d)
+          if [ -n "$DUPS" ]; then
+            echo "DUPLIKAT DITEMUKAN:"
+            echo "$DUPS"
+            exit 1
+          else
+            echo "Bersih - tidak ada file duplikat."
+          fi
+          echo "Total file .kt: $(find app/src -name "*.kt" | wc -l)"
+
+      - name: Pre-push check (fail fast)
+        shell: bash
+        run: python3 pre-push-check.py
+
+      - name: Check Keystore
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "HAS_KEYSTORE=false" >> "$GITHUB_ENV"
+            echo "Keystore tidak ada -> build DEBUG"
+          else
+            echo "$KEYSTORE_B64" | base64 -d > release-key.p12
+            echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
+            echo "Keystore ada -> build RELEASE"
+          fi
+
+      - name: Siapkan cert fingerprint untuk native
+        if: env.HAS_KEYSTORE == 'true'
+        shell: bash
+        env:
+          KEYSTORE_PW: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          FP=$(keytool -list -v -keystore release-key.p12 -storepass "$KEYSTORE_PW" 2>/dev/null | grep -i "SHA256:" | head -n 1 | awk '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+          if [ ${#FP} -ne 64 ]; then
+            echo "Fingerprint sertifikat tidak valid"
+            exit 1
+          fi
+          echo "CERT_SHA256_FP=$FP" >> "$GITHUB_ENV"
+
+      - name: Obfuscate site URLs
+        shell: bash
+        run: python3 obfuscate-strings.py
+
+      - name: Build Debug APK
+        id: build_apk
+        shell: bash
+        run: |
+          set -eo pipefail
+          ./gradlew --no-daemon --stacktrace clean assembleDebug 2>&1 | tee build.log
+
+      - name: Build Release APK (signed)
+        if: env.HAS_KEYSTORE == 'true'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/release-key.p12
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -eo pipefail
+          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee build-release.log
+
+      - name: Tampilkan ringkasan error
+        if: failure()
+        shell: bash
+        run: |
+          echo "===================== ERROR SUMMARY ======================"
+          grep -aE "^e: |^error:|FAILED$|FAILED |Caused by:|\* What went wrong|\* Exception is" build.log | head -40 || true
+          echo ""
+          echo "===================== LOG TAIL ======================"
+          tail -n 100 build.log || true
+
+      - name: Upload build log (saat gagal)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Copy APK dengan nama rapi
+        shell: bash
+        run: |
+          set -e
+          APK_PATH="$(find app/build/outputs/apk/debug -maxdepth 2 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
+          if [ -z "$APK_PATH" ]; then
+            echo "No debug APK found"
+            exit 1
+          fi
+          cp "$APK_PATH" "build_${{ github.run_number }}_debug.apk"
+          if [ "${{ env.HAS_KEYSTORE }}" == "true" ]; then
+            REL_PATH="$(find app/build/outputs/apk/release -maxdepth 2 -type f -name "*.apk" | head -n 1)"
+            if [ -n "$REL_PATH" ]; then
+              cp "$REL_PATH" "build_${{ github.run_number }}_release.apk"
+            fi
+          fi
+          ls -la *.apk
+
+      - name: Kompres APK ke ZIP berpassword
+        shell: bash
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$ZIP_PASSWORD" ]; then
+            echo "Secret ZIP_PASSWORD belum dipasang!"
+            exit 1
+          fi
+          rm -f "build_${{ github.run_number }}.zip"
+          zip -P "$ZIP_PASSWORD" "build_${{ github.run_number }}.zip" build_${{ github.run_number }}_*.apk
+          echo "--- verifikasi enkripsi ---"
+          if unzip -l "build_${{ github.run_number }}.zip" 2>&1 | grep -q "password"; then
+            echo "ZIP terenkripsi OK"
+          else
+            # cek via 7z atau header
+            python3 -c "
+          import zipfile
+          z = zipfile.ZipFile('build_${{ github.run_number }}.zip')
+          for info in z.infolist():
+              if info.flag_bits & 0x1:
+                  print('TERENKRIPSI:', info.filename)
+              else:
+                  print('TIDAK TERENKRIPSI:', info.filename)
+                  raise SystemExit(1)
+          "
+          fi
+          ls -la *.zip
+
+      - name: Upload APK ke GitHub Release (latest)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: latest
+          body: ""
+          artifacts: "build_${{ github.run_number }}.zip"
+          allowUpdates: true
+          replacesArtifacts: true
+          artifactErrorsFailBuild: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bersihkan aset Release lama (simpan 3 terbaru)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          IDS=$(gh api /repos/$REPO/releases/tags/latest \
+            --jq '.assets | sort_by(.created_at) | (if length > 3 then .[0:length-3] else [] end) | .[].id' | tr '\n' ' ')
+          if [ -z "$IDS" ]; then
+            echo "Aset Release <= 3, tidak ada yang dihapus."
+            exit 0
+          fi
+          echo "Menghapus aset lama: $IDS"
+          for id in $IDS; do
+            gh api -X DELETE "/repos/$REPO/releases/assets/$id" >/dev/null
+            echo "Dihapus: asset id $id"
+          done
