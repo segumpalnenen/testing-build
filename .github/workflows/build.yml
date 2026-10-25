@@ -111,6 +111,9 @@ jobs:
 
       - name: Build Debug APK
         id: build_apk
+        env:
+          ORG_GRADLE_PROJECT_subsourceApiKey1: ${{ secrets.SUBSOURCE_API_KEY_1 }}
+          ORG_GRADLE_PROJECT_subsourceApiKey2: ${{ secrets.SUBSOURCE_API_KEY_2 }}
         shell: bash
         run: |
           set -eo pipefail
@@ -120,6 +123,8 @@ jobs:
         if: env.HAS_KEYSTORE == 'true'
         shell: bash
         env:
+          ORG_GRADLE_PROJECT_subsourceApiKey1: ${{ secrets.SUBSOURCE_API_KEY_1 }}
+          ORG_GRADLE_PROJECT_subsourceApiKey2: ${{ secrets.SUBSOURCE_API_KEY_2 }}
           ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/release-key.p12
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
