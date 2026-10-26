@@ -63,15 +63,22 @@ jobs:
       - name: Cek file source duplikat
         shell: bash
         run: |
-          echo "=== File .kt duplikat ==="
-          DUPS=$(find app/src -name "*.kt" | xargs -n1 basename | sort | uniq -d)
-          if [ -n "$DUPS" ]; then
-            echo "DUPLIKAT DITEMUKAN:"
-            echo "$DUPS"
+          echo "=== File .kt duplikat (per varian: main + satu flavor) ==="
+          DUPS_MAIN=$(find app/src/main -name "*.kt" | xargs -n1 basename | sort | uniq -d)
+          if [ -n "$DUPS_MAIN" ]; then
+            echo "DUPLIKAT basename di main:"
+            echo "$DUPS_MAIN"
             exit 1
-          else
-            echo "Bersih - tidak ada file duplikat."
           fi
+          for FLAVOR in full lite; do
+            DUPS=$(cd app/src && find main "$FLAVOR" -name "*.kt" | sed 's|^[^/]*/||' | sort | uniq -d)
+            if [ -n "$DUPS" ]; then
+              echo "DUPLIKAT di varian $FLAVOR (path sama di main dan flavor):"
+              echo "$DUPS"
+              exit 1
+            fi
+          done
+          echo "Bersih - tidak ada file duplikat per varian."
           echo "Total file .kt: $(find app/src -name "*.kt" | wc -l)"
 
       - name: Pre-push check (fail fast)
@@ -156,16 +163,22 @@ jobs:
         shell: bash
         run: |
           set -e
-          APK_PATH="$(find app/build/outputs/apk/debug -maxdepth 2 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
-          if [ -z "$APK_PATH" ]; then
-            echo "No debug APK found"
+          FULL_APK="$(find app/build/outputs/apk/full/debug -maxdepth 1 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
+          LITE_APK="$(find app/build/outputs/apk/lite/debug -maxdepth 1 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
+          if [ -z "$FULL_APK" ] || [ -z "$LITE_APK" ]; then
+            echo "APK debug full/lite tidak lengkap: full=$FULL_APK lite=$LITE_APK"
             exit 1
           fi
-          cp "$APK_PATH" "build_${{ github.run_number }}_debug.apk"
+          cp "$FULL_APK" "build_${{ github.run_number }}_debug.apk"
+          cp "$LITE_APK" "build_lite_${{ github.run_number }}_debug.apk"
           if [ "${{ env.HAS_KEYSTORE }}" == "true" ]; then
-            REL_PATH="$(find app/build/outputs/apk/release -maxdepth 2 -type f -name "*.apk" | head -n 1)"
-            if [ -n "$REL_PATH" ]; then
-              cp "$REL_PATH" "build_${{ github.run_number }}_release.apk"
+            FULL_REL="$(find app/build/outputs/apk/full/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+            LITE_REL="$(find app/build/outputs/apk/lite/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+            if [ -n "$FULL_REL" ]; then
+              cp "$FULL_REL" "build_${{ github.run_number }}_release.apk"
+            fi
+            if [ -n "$LITE_REL" ]; then
+              cp "$LITE_REL" "build_lite_${{ github.run_number }}_release.apk"
             fi
           fi
           ls -la *.apk
@@ -181,7 +194,7 @@ jobs:
             exit 1
           fi
           rm -f "build_${{ github.run_number }}.zip"
-          zip -P "$ZIP_PASSWORD" "build_${{ github.run_number }}.zip" build_${{ github.run_number }}_*.apk
+          zip -P "$ZIP_PASSWORD" "build_${{ github.run_number }}.zip" build_${{ github.run_number }}_*.apk build_lite_${{ github.run_number }}_*.apk
           echo "--- verifikasi enkripsi ---"
           if unzip -l "build_${{ github.run_number }}.zip" 2>&1 | grep -q "password"; then
             echo "ZIP terenkripsi OK"
