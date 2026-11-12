@@ -92,7 +92,7 @@ jobs:
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
             echo "HAS_KEYSTORE=false" >> "$GITHUB_ENV"
-            echo "Keystore tidak ada -> build DEBUG"
+            echo "Keystore tidak ada -> build RELEASE tidak bisa jalan"
           else
             echo "$KEYSTORE_B64" | base64 -d > release-key.p12
             echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
@@ -116,16 +116,6 @@ jobs:
         shell: bash
         run: python3 obfuscate-strings.py
 
-      - name: Build Debug APK
-        id: build_apk
-        env:
-          ORG_GRADLE_PROJECT_subsourceApiKey1: ${{ secrets.SUBSOURCE_API_KEY_1 }}
-          ORG_GRADLE_PROJECT_subsourceApiKey2: ${{ secrets.SUBSOURCE_API_KEY_2 }}
-        shell: bash
-        run: |
-          set -eo pipefail
-          ./gradlew --no-daemon --stacktrace clean assembleDebug 2>&1 | tee build.log
-
       - name: Build Release APK (signed)
         if: env.HAS_KEYSTORE == 'true'
         shell: bash
@@ -138,7 +128,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -eo pipefail
-          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee build-release.log
+          ./gradlew --no-daemon --stacktrace clean assembleRelease 2>&1 | tee build.log
 
       - name: Tampilkan ringkasan error
         if: failure()
@@ -163,24 +153,14 @@ jobs:
         shell: bash
         run: |
           set -e
-          FULL_APK="$(find app/build/outputs/apk/full/debug -maxdepth 1 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
-          LITE_APK="$(find app/build/outputs/apk/lite/debug -maxdepth 1 -type f -name "*.apk" ! -name "*androidTest*" | head -n 1)"
-          if [ -z "$FULL_APK" ] || [ -z "$LITE_APK" ]; then
-            echo "APK debug full/lite tidak lengkap: full=$FULL_APK lite=$LITE_APK"
+          FULL_REL="$(find app/build/outputs/apk/full/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+          LITE_REL="$(find app/build/outputs/apk/lite/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+          if [ -z "$FULL_REL" ] || [ -z "$LITE_REL" ]; then
+            echo "APK release full/lite tidak lengkap: full=$FULL_REL lite=$LITE_REL"
             exit 1
           fi
-          cp "$FULL_APK" "build_${{ github.run_number }}_debug.apk"
-          cp "$LITE_APK" "build_lite_${{ github.run_number }}_debug.apk"
-          if [ "${{ env.HAS_KEYSTORE }}" == "true" ]; then
-            FULL_REL="$(find app/build/outputs/apk/full/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
-            LITE_REL="$(find app/build/outputs/apk/lite/release -maxdepth 1 -type f -name "*.apk" | head -n 1)"
-            if [ -n "$FULL_REL" ]; then
-              cp "$FULL_REL" "build_${{ github.run_number }}_release.apk"
-            fi
-            if [ -n "$LITE_REL" ]; then
-              cp "$LITE_REL" "build_lite_${{ github.run_number }}_release.apk"
-            fi
-          fi
+          cp "$FULL_REL" "build_${{ github.run_number }}_release.apk"
+          cp "$LITE_REL" "build_lite_${{ github.run_number }}_release.apk"
           ls -la *.apk
 
       - name: Kompres APK ke ZIP berpassword
