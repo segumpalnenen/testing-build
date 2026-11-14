@@ -27,6 +27,7 @@ jobs:
           repository: segumpalnenen/anichin-app
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           ref: ${{ github.event.client_payload.sha || github.event.inputs.sha || 'main' }}
+          submodules: recursive
 
       - name: Info build
         shell: bash
